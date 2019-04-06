@@ -8,6 +8,8 @@ use App\Http\Resources\Product\ProductCollection;
 use App\Model\Product;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\Log;
 
 class ProductController extends Controller
 {
@@ -31,12 +33,16 @@ class ProductController extends Controller
     {
         $product = new Product;
         $product->name = $request->name;
-        $product->detail = $request->description;
+        $product->description = $request->description;
         $product->price = $request->price;
         $product->stock = $request->stock;
         $product->discount = $request->discount;
         $product->save();
-         return response([
+
+        $this->store_redis($product->id, $request);        
+        $this->log_print('[REDIS | DATABASE] Stored product detail for product: '.$product);
+
+        return response([
           'data' => new ProductResource($product)
         ], Response::HTTP_CREATED);
 
@@ -50,7 +56,49 @@ class ProductController extends Controller
      */
     public function show(Product $product)
     {
-        return new ProductResource($product);
+        $stored = Redis::hgetall('product:'.$product->id);
+        if (!empty($stored)) {
+            $product_redis = new Product([
+                'name' => $stored['name'],
+                'description' => $stored['description'],
+                'price' => $stored['price'],
+                'stock' => $stored['stock'],
+                'discount' => $stored['discount']
+            ]);
+            $this->log_print('[REDIS] Showing product detail for product: '.$product_redis);
+            return new ProductResource($product_redis);
+        } else {
+            $product_redis = new Product([
+                'name' => $product['name'],
+                'description' => $product['description'],
+                'price' => $product['price'],
+                'stock' => $product['stock'],
+                'discount' => $product['discount']
+            ]);
+            $this->store_redis($product->id, $product_redis);
+            $this->log_print('[DATABASE] Showing product detail for product: '.$product);
+            return new ProductResource($product);
+        }
+    }
+
+    public function log_print($message){
+        $console = new \Symfony\Component\Console\Output\ConsoleOutput();
+        $console->writeln($message);
+        Log::debug($message);
+    }
+
+    public function store_redis($id, $data){
+        return Redis::hmset('product:'.$id, [
+            'name' => $data->name,
+            'description' => $data->description,
+            'price' => $data->price,
+            'stock' => $data->stock,
+            'discount' => $data->discount
+        ]);
+    }
+
+    public function destroy_redis($id){
+        return Redis::del("product:".$id);
     }
 
     /**
@@ -62,9 +110,9 @@ class ProductController extends Controller
      */
     public function update(Request $request, Product $product)
     {
-        $request['detail']= $request->description;
-        unset($request['description']);
         $product->update($request->all());
+        $this->store_redis($product->id, $request);
+
         return response([
           'data' => new ProductResource($product)
         ], Response::HTTP_OK);
@@ -78,6 +126,7 @@ class ProductController extends Controller
      */
     public function destroy(Product $product)
     {
+        $this->destroy_redis($product->id);
         $product->delete();
         return response(null, Response::HTTP_NO_CONTENT);
     }
